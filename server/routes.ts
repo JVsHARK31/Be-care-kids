@@ -1,5 +1,4 @@
 import type { Express } from "express";
-import { createServer, type Server } from "http";
 import { z } from "zod";
 import { AnalysisRequestSchema, NutritionAnalysisSchema, insertUserSchema, insertMealSchema, insertNutritionGoalsSchema } from "@shared/schema";
 import { storage } from "./storage";
@@ -159,7 +158,7 @@ function extractJSON(text: string): object {
   }
 }
 
-export async function registerRoutes(app: Express): Promise<Server> {
+export async function registerRoutes(app: Express): Promise<Express> {
   // Check available models for debugging
   app.get("/api/models", async (req, res) => {
     try {
@@ -285,6 +284,5 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.status(410).json({ message: "Nutrition goals moved to client-side localStorage" });
   });
 
-  const httpServer = createServer(app);
-  return httpServer;
+  return app;
 }
