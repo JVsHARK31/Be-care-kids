@@ -70,6 +70,94 @@ function extractJSON(text: string): object {
   }
 }
 
+function toNumber(value: any, fallback = 0): number {
+  const num = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function normalizeAnalysis(raw: any) {
+  const image_meta = {
+    width: toNumber(raw?.image_meta?.width, 0),
+    height: toNumber(raw?.image_meta?.height, 0),
+    orientation:
+      (raw?.image_meta?.orientation === 'portrait' ||
+        raw?.image_meta?.orientation === 'landscape' ||
+        raw?.image_meta?.orientation === 'square')
+        ? raw.image_meta.orientation
+        : (toNumber(raw?.image_meta?.width, 0) === toNumber(raw?.image_meta?.height, 0)
+            ? 'square'
+            : toNumber(raw?.image_meta?.width, 0) > toNumber(raw?.image_meta?.height, 0)
+              ? 'landscape'
+              : 'portrait'),
+  } as const;
+
+  const composition: any[] = Array.isArray(raw?.composition) ? raw.composition : [];
+  const normItems = composition.map((it) => ({
+    label: String(it?.label ?? 'item'),
+    confidence: toNumber(it?.confidence, 0.5),
+    serving_est_g: toNumber(it?.serving_est_g, 0),
+    bbox_norm: {
+      x: toNumber(it?.bbox_norm?.x, 0),
+      y: toNumber(it?.bbox_norm?.y, 0),
+      w: toNumber(it?.bbox_norm?.w, 0),
+      h: toNumber(it?.bbox_norm?.h, 0),
+    },
+    nutrition: {
+      calories_kcal: toNumber(it?.nutrition?.calories_kcal, 0),
+      macros: {
+        protein_g: toNumber(it?.nutrition?.macros?.protein_g, 0),
+        carbs_g: toNumber(it?.nutrition?.macros?.carbs_g, 0),
+        fat_g: toNumber(it?.nutrition?.macros?.fat_g, 0),
+        fiber_g: toNumber(it?.nutrition?.macros?.fiber_g, 0),
+        sugar_g: toNumber(it?.nutrition?.macros?.sugar_g, 0),
+      },
+      micros: {
+        sodium_mg: toNumber(it?.nutrition?.micros?.sodium_mg, 0),
+        potassium_mg: toNumber(it?.nutrition?.micros?.potassium_mg, 0),
+        calcium_mg: toNumber(it?.nutrition?.micros?.calcium_mg, 0),
+        iron_mg: toNumber(it?.nutrition?.micros?.iron_mg, 0),
+        vitamin_a_mcg: toNumber(it?.nutrition?.micros?.vitamin_a_mcg, 0),
+        vitamin_c_mg: toNumber(it?.nutrition?.micros?.vitamin_c_mg, 0),
+        cholesterol_mg: toNumber(it?.nutrition?.micros?.cholesterol_mg, 0),
+      },
+      allergens: Array.isArray(it?.nutrition?.allergens) ? it.nutrition.allergens.map(String) : [],
+    },
+  }));
+
+  // derive totals if missing
+  const totalsProvided = raw?.totals ?? {};
+  const totals = {
+    serving_total_g: toNumber(totalsProvided?.serving_total_g, normItems.reduce((s, i) => s + toNumber(i.serving_est_g, 0), 0)),
+    calories_kcal: toNumber(totalsProvided?.calories_kcal, normItems.reduce((s, i) => s + toNumber(i.nutrition?.calories_kcal, 0), 0)),
+    macros: {
+      protein_g: toNumber(totalsProvided?.macros?.protein_g, normItems.reduce((s, i) => s + toNumber(i.nutrition?.macros?.protein_g, 0), 0)),
+      carbs_g: toNumber(totalsProvided?.macros?.carbs_g, normItems.reduce((s, i) => s + toNumber(i.nutrition?.macros?.carbs_g, 0), 0)),
+      fat_g: toNumber(totalsProvided?.macros?.fat_g, normItems.reduce((s, i) => s + toNumber(i.nutrition?.macros?.fat_g, 0), 0)),
+      fiber_g: toNumber(totalsProvided?.macros?.fiber_g, normItems.reduce((s, i) => s + toNumber(i.nutrition?.macros?.fiber_g, 0), 0)),
+      sugar_g: toNumber(totalsProvided?.macros?.sugar_g, normItems.reduce((s, i) => s + toNumber(i.nutrition?.macros?.sugar_g, 0), 0)),
+    },
+    micros: {
+      sodium_mg: toNumber(totalsProvided?.micros?.sodium_mg, normItems.reduce((s, i) => s + toNumber(i.nutrition?.micros?.sodium_mg, 0), 0)),
+      potassium_mg: toNumber(totalsProvided?.micros?.potassium_mg, normItems.reduce((s, i) => s + toNumber(i.nutrition?.micros?.potassium_mg, 0), 0)),
+      calcium_mg: toNumber(totalsProvided?.micros?.calcium_mg, normItems.reduce((s, i) => s + toNumber(i.nutrition?.micros?.calcium_mg, 0), 0)),
+      iron_mg: toNumber(totalsProvided?.micros?.iron_mg, normItems.reduce((s, i) => s + toNumber(i.nutrition?.micros?.iron_mg, 0), 0)),
+      vitamin_a_mcg: toNumber(totalsProvided?.micros?.vitamin_a_mcg, normItems.reduce((s, i) => s + toNumber(i.nutrition?.micros?.vitamin_a_mcg, 0), 0)),
+      vitamin_c_mg: toNumber(totalsProvided?.micros?.vitamin_c_mg, normItems.reduce((s, i) => s + toNumber(i.nutrition?.micros?.vitamin_c_mg, 0), 0)),
+      cholesterol_mg: toNumber(totalsProvided?.micros?.cholesterol_mg, normItems.reduce((s, i) => s + toNumber(i.nutrition?.micros?.cholesterol_mg, 0), 0)),
+    },
+    allergens: Array.isArray(totalsProvided?.allergens)
+      ? totalsProvided.allergens.map(String)
+      : Array.from(new Set(normItems.flatMap((i: any) => Array.isArray(i?.nutrition?.allergens) ? i.nutrition.allergens.map(String) : []))),
+  };
+
+  return {
+    image_meta,
+    composition: normItems,
+    totals,
+    notes: typeof raw?.notes === 'string' ? raw.notes : undefined,
+  };
+}
+
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: false, limit: '10mb' }));
@@ -123,7 +211,8 @@ app.post("/api/analyze-image", async (req: Request, res: Response) => {
           try {
             const raw = await callSumopodAPI(key, model, dataURL);
             const json = extractJSON(raw);
-            return res.json(json);
+            const normalized = normalizeAnalysis(json);
+            return res.json(normalized);
           } catch (e: any) {
             const msg = typeof e?.message === 'string' ? e.message : '';
             // Ulangi hanya jika kemungkinan masalah sementara (5xx/UNAVAILABLE)
@@ -172,7 +261,8 @@ app.post("/api/analyze-camera", async (req: Request, res: Response) => {
           try {
             const raw = await callSumopodAPI(key, model, dataURL);
             const json = extractJSON(raw);
-            return res.json(json);
+            const normalized = normalizeAnalysis(json);
+            return res.json(normalized);
           } catch (e: any) {
             const msg = typeof e?.message === 'string' ? e.message : '';
             const transient = /\b(5\\d{2}|UNAVAILABLE|timeout)\b/i.test(msg);
