@@ -99,15 +99,49 @@ app.post("/api/analyze-image", async (req: Request, res: Response) => {
     if (!dataURL) {
       return res.status(400).json({ message: "dataURL is required" });
     }
-
-    const apiKey = process.env.SUMOPOD_GEMINI_API_KEY || process.env.SUMOPOD_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ message: "SUMOPOD_GEMINI_API_KEY or SUMOPOD_API_KEY not configured" });
+    // Siapkan fallback model dan key
+    const keyGemini = process.env.SUMOPOD_GEMINI_API_KEY || process.env.SUMOPOD_API_KEY;
+    const keyGpt = process.env.SUMOPOD_GPT5_API_KEY || process.env.SUMOPOD_API_KEY;
+    if (!keyGemini && !keyGpt) {
+      return res.status(500).json({ message: "Sumopod API keys not configured" });
     }
 
-    const raw = await callSumopodAPI(apiKey, "gemini/gemini-2.0-flash", dataURL);
-    const json = extractJSON(raw);
-    return res.json(json);
+    const candidates: Array<{ model: string; key: string }> = [];
+    if (keyGemini) {
+      candidates.push({ model: "gemini/gemini-2.0-flash", key: keyGemini });
+      candidates.push({ model: "gemini/gemini-1.5-flash", key: keyGemini });
+    }
+    if (keyGpt) {
+      candidates.push({ model: "gpt-5-nano", key: keyGpt });
+    }
+
+    // Coba berurutan dengan retry ringan untuk 5xx
+    let lastErr: unknown = undefined;
+    for (const { model, key } of candidates) {
+      try {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const raw = await callSumopodAPI(key, model, dataURL);
+            const json = extractJSON(raw);
+            return res.json(json);
+          } catch (e: any) {
+            const msg = typeof e?.message === 'string' ? e.message : '';
+            // Ulangi hanya jika kemungkinan masalah sementara (5xx/UNAVAILABLE)
+            const transient = /\b(5\\d{2}|UNAVAILABLE|timeout)\b/i.test(msg);
+            if (attempt === 0 && transient) {
+              await new Promise(r => setTimeout(r, 500));
+              continue;
+            }
+            throw e;
+          }
+        }
+      } catch (err) {
+        lastErr = err;
+        // lanjut ke kandidat berikutnya
+      }
+    }
+
+    throw lastErr ?? new Error("All model candidates failed");
   } catch (error) {
     console.error("/api/analyze-image error:", error);
     return res.status(500).json({ message: error instanceof Error ? error.message : "Analysis failed" });
@@ -121,15 +155,40 @@ app.post("/api/analyze-camera", async (req: Request, res: Response) => {
     if (!dataURL) {
       return res.status(400).json({ message: "dataURL is required" });
     }
-
-    const apiKey = process.env.SUMOPOD_GPT5_API_KEY || process.env.SUMOPOD_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ message: "SUMOPOD_GPT5_API_KEY or SUMOPOD_API_KEY not configured" });
+    const keyGpt = process.env.SUMOPOD_GPT5_API_KEY || process.env.SUMOPOD_API_KEY;
+    const keyGemini = process.env.SUMOPOD_GEMINI_API_KEY || process.env.SUMOPOD_API_KEY;
+    if (!keyGpt && !keyGemini) {
+      return res.status(500).json({ message: "Sumopod API keys not configured" });
     }
 
-    const raw = await callSumopodAPI(apiKey, "gpt-5-nano", dataURL);
-    const json = extractJSON(raw);
-    return res.json(json);
+    const candidates: Array<{ model: string; key: string }> = [];
+    if (keyGpt) candidates.push({ model: "gpt-5-nano", key: keyGpt });
+    if (keyGemini) candidates.push({ model: "gemini/gemini-2.0-flash", key: keyGemini });
+
+    let lastErr: unknown = undefined;
+    for (const { model, key } of candidates) {
+      try {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const raw = await callSumopodAPI(key, model, dataURL);
+            const json = extractJSON(raw);
+            return res.json(json);
+          } catch (e: any) {
+            const msg = typeof e?.message === 'string' ? e.message : '';
+            const transient = /\b(5\\d{2}|UNAVAILABLE|timeout)\b/i.test(msg);
+            if (attempt === 0 && transient) {
+              await new Promise(r => setTimeout(r, 500));
+              continue;
+            }
+            throw e;
+          }
+        }
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+
+    throw lastErr ?? new Error("All model candidates failed");
   } catch (error) {
     console.error("/api/analyze-camera error:", error);
     return res.status(500).json({ message: error instanceof Error ? error.message : "Analysis failed" });
