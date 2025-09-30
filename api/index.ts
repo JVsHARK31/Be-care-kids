@@ -1,5 +1,75 @@
 import express, { type Request, Response, NextFunction } from "express";
 
+const SUMOPOD_BASE_URL = "https://ai.sumopod.com/v1/chat/completions";
+
+async function callSumopodAPI(apiKey: string, model: string, dataURL: string): Promise<any> {
+  const requestBody = {
+    model,
+    temperature: 0.2,
+    max_tokens: 4000,
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are a pediatric nutrition and food composition expert. Respond with STRICT JSON only per the provided schema. No extra text.",
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text:
+              "Analyze this image. Identify each distinct food item (e.g., nasi goreng, kerupuk, sayur, telur, sosis). For each item, estimate serving_est_g and provide nutrition fields. Provide composition bounding boxes as normalized bbox (x,y,w,h) in [0..1]. Sum all items into totals. Reply strictly with JSON schema only.",
+          },
+          {
+            type: "image_url",
+            image_url: {
+              url: dataURL,
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  const response = await fetch(SUMOPOD_BASE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(requestBody),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Sumopod API error: ${response.status} ${response.statusText} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  const content = data.choices?.[0]?.message?.content ?? "";
+  return content;
+}
+
+function extractJSON(text: string): object {
+  try {
+    return JSON.parse(text);
+  } catch {
+    let cleanedText = text.replace(/```json\s*/g, "").replace(/```/g, "").trim();
+    try {
+      return JSON.parse(cleanedText);
+    } catch {
+      const firstBrace = cleanedText.indexOf("{");
+      const lastBrace = cleanedText.lastIndexOf("}");
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        const jsonStr = cleanedText.substring(firstBrace, lastBrace + 1);
+        return JSON.parse(jsonStr);
+      }
+      throw new Error("No JSON found in response");
+    }
+  }
+}
+
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: false, limit: '10mb' }));
@@ -17,186 +87,60 @@ app.use((req, res, next) => {
   }
 });
 
-// Error handling middleware
-app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-  console.error('Error:', err);
-  const status = err.status || err.statusCode || 500;
-  const message = err.message || "Internal Server Error";
-
-  res.status(status).json({ message });
-});
-
 // Health check endpoint
-app.get("/api/health", (req, res) => {
+app.get("/api/health", (_req, res) => {
   res.json({ status: "OK", timestamp: new Date().toISOString() });
 });
 
-// Image analysis endpoint
-app.post("/api/analyze-image", async (req, res) => {
+// Upload image analysis using GEMINI
+app.post("/api/analyze-image", async (req: Request, res: Response) => {
   try {
-    const { dataURL } = req.body;
-    
+    const { dataURL } = req.body as { dataURL?: string };
     if (!dataURL) {
       return res.status(400).json({ message: "dataURL is required" });
     }
 
-    const apiKey = process.env.SUMOPOD_GEMINI_API_KEY;
+    const apiKey = process.env.SUMOPOD_GEMINI_API_KEY || process.env.SUMOPOD_API_KEY;
     if (!apiKey) {
-      return res.status(500).json({ 
-        message: "SUMOPOD_GEMINI_API_KEY not configured" 
-      });
+      return res.status(500).json({ message: "SUMOPOD_GEMINI_API_KEY or SUMOPOD_API_KEY not configured" });
     }
 
-    // Simple mock response for now
-    const mockResponse = {
-      image_meta: {
-        width: 800,
-        height: 600,
-        orientation: "landscape"
-      },
-      composition: [
-        {
-          label: "Nasi Goreng",
-          confidence: 0.95,
-          serving_est_g: 200,
-          bbox_norm: { x: 0.1, y: 0.1, w: 0.8, h: 0.6 },
-          nutrition: {
-            calories_kcal: 350,
-            macros: {
-              protein_g: 12,
-              carbs_g: 45,
-              fat_g: 8,
-              fiber_g: 2,
-              sugar_g: 3
-            },
-            micros: {
-              sodium_mg: 800,
-              potassium_mg: 300,
-              calcium_mg: 50,
-              iron_mg: 2,
-              vitamin_a_mcg: 100,
-              vitamin_c_mg: 15,
-              cholesterol_mg: 25
-            },
-            allergens: ["gluten"]
-          }
-        }
-      ],
-      totals: {
-        serving_total_g: 200,
-        calories_kcal: 350,
-        macros: {
-          protein_g: 12,
-          carbs_g: 45,
-          fat_g: 8,
-          fiber_g: 2,
-          sugar_g: 3
-        },
-        micros: {
-          sodium_mg: 800,
-          potassium_mg: 300,
-          calcium_mg: 50,
-          iron_mg: 2,
-          vitamin_a_mcg: 100,
-          vitamin_c_mg: 15,
-          cholesterol_mg: 25
-        },
-        allergens: ["gluten"]
-      },
-      notes: "Analysis completed successfully"
-    };
-
-    res.json(mockResponse);
+    const raw = await callSumopodAPI(apiKey, "gemini/gemini-2.0-flash", dataURL);
+    const json = extractJSON(raw);
+    return res.json(json);
   } catch (error) {
-    console.error('Image analysis error:', error);
-    res.status(500).json({ 
-      message: error instanceof Error ? error.message : "Analysis failed" 
-    });
+    console.error("/api/analyze-image error:", error);
+    return res.status(500).json({ message: error instanceof Error ? error.message : "Analysis failed" });
   }
 });
 
-// Camera analysis endpoint
-app.post("/api/analyze-camera", async (req, res) => {
+// Camera capture analysis using GPT-5-nano
+app.post("/api/analyze-camera", async (req: Request, res: Response) => {
   try {
-    const { dataURL } = req.body;
-    
+    const { dataURL } = req.body as { dataURL?: string };
     if (!dataURL) {
       return res.status(400).json({ message: "dataURL is required" });
     }
 
-    const apiKey = process.env.SUMOPOD_GPT5_API_KEY;
+    const apiKey = process.env.SUMOPOD_GPT5_API_KEY || process.env.SUMOPOD_API_KEY;
     if (!apiKey) {
-      return res.status(500).json({ 
-        message: "SUMOPOD_GPT5_API_KEY not configured" 
-      });
+      return res.status(500).json({ message: "SUMOPOD_GPT5_API_KEY or SUMOPOD_API_KEY not configured" });
     }
 
-    // Simple mock response for now
-    const mockResponse = {
-      image_meta: {
-        width: 800,
-        height: 600,
-        orientation: "landscape"
-      },
-      composition: [
-        {
-          label: "Makanan Kamera",
-          confidence: 0.90,
-          serving_est_g: 150,
-          bbox_norm: { x: 0.2, y: 0.2, w: 0.6, h: 0.5 },
-          nutrition: {
-            calories_kcal: 250,
-            macros: {
-              protein_g: 8,
-              carbs_g: 35,
-              fat_g: 6,
-              fiber_g: 3,
-              sugar_g: 5
-            },
-            micros: {
-              sodium_mg: 600,
-              potassium_mg: 250,
-              calcium_mg: 40,
-              iron_mg: 1.5,
-              vitamin_a_mcg: 80,
-              vitamin_c_mg: 12,
-              cholesterol_mg: 20
-            },
-            allergens: []
-          }
-        }
-      ],
-      totals: {
-        serving_total_g: 150,
-        calories_kcal: 250,
-        macros: {
-          protein_g: 8,
-          carbs_g: 35,
-          fat_g: 6,
-          fiber_g: 3,
-          sugar_g: 5
-        },
-        micros: {
-          sodium_mg: 600,
-          potassium_mg: 250,
-          calcium_mg: 40,
-          iron_mg: 1.5,
-          vitamin_a_mcg: 80,
-          vitamin_c_mg: 12,
-          cholesterol_mg: 20
-        },
-        allergens: []
-      },
-      notes: "Camera analysis completed successfully"
-    };
-
-    res.json(mockResponse);
+    const raw = await callSumopodAPI(apiKey, "gpt-5-nano", dataURL);
+    const json = extractJSON(raw);
+    return res.json(json);
   } catch (error) {
-    console.error('Camera analysis error:', error);
-    res.status(500).json({ 
-      message: error instanceof Error ? error.message : "Analysis failed" 
-    });
+    console.error("/api/analyze-camera error:", error);
+    return res.status(500).json({ message: error instanceof Error ? error.message : "Analysis failed" });
   }
+});
+
+// Error handling middleware (last)
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  const status = err?.status || err?.statusCode || 500;
+  const message = err?.message || "Internal Server Error";
+  res.status(status).json({ message });
 });
 
 export default app;
